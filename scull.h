@@ -1,6 +1,6 @@
 
-#define SCULL_QUANTUM 1
-#define SCULL_QSET    1
+#define SCULL_QUANTUM 4000
+#define SCULL_QSET    1000
 
 struct scull_qset
 {

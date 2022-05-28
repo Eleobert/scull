@@ -6,11 +6,9 @@
 #include <linux/cdev.h>
 #include <linux/kdev_t.h>
 #include <linux/slab.h>
+#include <linux/semaphore.h>
 
 #include "scull.h"
-
-#define MAX_BUF 20
-char buffer[MAX_BUF];
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -31,7 +29,7 @@ struct scull_dev
     int qset;                /* the current array size */
     unsigned long size;      /* amount of data stored here */
     unsigned int access_key; /* used by sculluid and scullpriv */
-    struct semaphore sem;    /* mutual exclusion semaphore */
+    struct mutex lock;    /* mutual exclusion semaphore */
     struct cdev cdev;        /* Char device structure */
 };
 
@@ -83,10 +81,6 @@ int scull_open(struct inode* node, struct file* filp)
     return 0;
 }
 
-int scull_release(struct inode* node, struct file* filp)
-{
-    return 0;
-}
 
 struct scull_qset *scull_follow(struct scull_dev *dev, int n)
 {
@@ -114,12 +108,10 @@ struct scull_qset *scull_follow(struct scull_dev *dev, int n)
 	return qs;
 }
 
+
 ssize_t scull_read(struct file *filp, char __user* buf, size_t count,
                 loff_t* f_pos)
 {
-    if(count > MAX_BUF) count = MAX_BUF;
-    return count - copy_to_user(buf, buffer, count);
-
     struct scull_dev * dev  = filp->private_data;
     struct scull_qset* dptr;
 
@@ -127,9 +119,9 @@ ssize_t scull_read(struct file *filp, char __user* buf, size_t count,
     int itemsize = quantum * qset;
 
     int item, s_pos, q_pos, rest;
-    ssize_t retval;
+    ssize_t retval = 0;
 
-    if(down_interruptible(&dev->sem))
+    if(mutex_lock_interruptible(&dev->lock))
         return -ERESTARTSYS;
     if(*f_pos >= dev->size)
         goto out;
@@ -157,7 +149,7 @@ ssize_t scull_read(struct file *filp, char __user* buf, size_t count,
     retval  = count;
 
 out:
-    up(&dev->sem);
+    mutex_unlock(&dev->lock);
     return retval;
 }
 
@@ -165,19 +157,14 @@ out:
 ssize_t scull_write(struct file *filp, const char __user* buf, size_t count,
                 loff_t* f_pos)
 {
-    printk(KERN_NOTICE "scull: scull_write");
-    if(count > MAX_BUF) return -ENOMEM;
-    return count - copy_from_user(buffer, buf, count);
-    struct scull_dev * dev = filp->private_data;
+    struct scull_dev* dev = filp->private_data;
     struct scull_qset* dptr;
-
-    int quantum  = dev->quantum, qset = dev->qset;
+    int quantum = dev->quantum, qset = dev->qset;
     int itemsize = quantum * qset;
     int item, s_pos, q_pos, rest;
-
     ssize_t retval = -ENOMEM;
 
-    if(down_interruptible(&dev->sem))
+    if(mutex_lock_interruptible(&dev->lock))
         return -ERESTARTSYS;
 
     item  = (long)*f_pos / itemsize;
@@ -218,8 +205,8 @@ ssize_t scull_write(struct file *filp, const char __user* buf, size_t count,
     if(dev->size < *f_pos)
         dev->size = *f_pos;
     
-    out:
-    up(&dev->sem);
+out:
+    mutex_unlock(&dev->lock);
     return retval;
 }
 
@@ -231,7 +218,7 @@ struct file_operations scull_fops =
     .read    = scull_read,
     .write   = scull_write,
     // .ioctl   = scull_ioctl,
-    // .open    = scull_open,
+    .open    = scull_open,
     // .release = scull_release,
 };
 
@@ -249,7 +236,6 @@ static void scull_setup_cdev(struct scull_dev* dev, int index)
 
     if(err)
         printk(KERN_NOTICE "Error %d adding scull%d", err, index);
-
 }
 
 
@@ -274,9 +260,7 @@ static int scull_init(void)
     {
         printk(KERN_WARNING "scull: can't get major %d\n", scull_major);
         return result;
-    }
-
-    
+    }    
 
     scull_devices = kmalloc(scull_nr_devs * sizeof(struct scull_dev), GFP_KERNEL);
 
@@ -292,6 +276,7 @@ static int scull_init(void)
     {
         //scull_devices[i].quantum = scull_quantum;
         //scull_devices[i].quantum = scull_quantum;
+        mutex_init(&scull_devices[i].lock);
         scull_setup_cdev(&scull_devices[i], i);
     }
     printk("scull: device initialized");
